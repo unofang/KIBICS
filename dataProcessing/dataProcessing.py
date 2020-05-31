@@ -7,6 +7,8 @@ from keras.preprocessing import image
 import numpy as np
 from pandas import DataFrame as DF
 
+from dataPreparation.dataClean import fix_orientation,extract_center
+
 def named_model(model_name):
     # include_top=False removes the fully connected layer at the end/top of the network
     # This allows us to get the feature vector as opposed to a classification
@@ -31,33 +33,26 @@ def named_model(model_name):
     else:
         raise ValueError('Unrecognised model: "{}"'.format(model_name))
 
-def extract_feature(img,model):
+def extract_feature(img_name,model,imgs_dir):
+    img = image.load_img(imgs_dir+'/'+img_name,target_size=(224,224,3))
+    img = fix_orientation(img)
+    img = extract_center(img)
+    img = img.convert(mode="RGB")
     img = np.expand_dims(img, axis=0)
     img = preprocess_input(img)
     np_features = model.predict(img)[0]
 
     return np.char.mod('%f', np_features)
 
-def mainDataProcessing(model_name, image_data):
+def mainDataProcessing(model_name,img_names,imgs_dir):
     print("Start: Extracting features")
     model = named_model(model_name)
 
-    features = returnFeatures(image_data,model)
-    img_names = returnImageData(image_data)
-    # features = []
-    # img_names = []
-    # for i in tqdm(range(len(image_data))):
-    #     # features.append(extract_feature(image_data[i][0],model))
-    #     # img_names.append(image_data[i][1])
-    #     yield extract_feature(image_data[i][0],model)
-    #     yield image_data[i][1]
+    for i in tqdm(range(len(img_names))):
+        yield extract_feature(img_names[i],model,imgs_dir)
 
-    return features,img_names
+def mainDataProcessingNotqdm(model_name,img_names,imgs_dir):
+    model = named_model(model_name)
 
-def returnFeatures(image_data,model):
-    for i in tqdm(range(len(image_data))):
-        yield extract_feature(image_data[i][0],model)
-
-def returnImageData(image_data):
-    for i in tqdm(range(len(image_data))):
-        yield image_data[i][1]
+    for i in range(len(img_names)):
+        yield extract_feature(img_names[i],model,imgs_dir)

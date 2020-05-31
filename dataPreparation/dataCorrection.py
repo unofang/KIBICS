@@ -6,3 +6,10 @@ def dataCorrection(features_df):
     dataset = np.array(dataset)
 
     return dataset
+
+def dataCorrectionForMerging(features_df):
+    dataset = features_df.values
+    dataset = [[y for y in x] for x in dataset]
+    dataset = np.array(dataset)
+
+    return dataset

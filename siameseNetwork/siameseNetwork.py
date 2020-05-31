@@ -4,6 +4,7 @@ from PIL import Image
 from tqdm import tqdm
 import psutil
 import os
+import gc
 
 import tensorflow as tf
 import keras.backend.tensorflow_backend as tfback
@@ -22,7 +23,8 @@ from keras.optimizers import Adam
 from dataPreparation.dataListToFile import saveListToFile
 from dataPlot.trainingClassificationPlot import trainingClassificationPlot
 
-from memoryManagement.memoryRelease import releaseList,clearAllValuesExceptSelection
+from memoryManagement.memoryRelease import releaseList
+from memoryManagement.memoryCheck import memoryCheck
 
 def _get_available_gpus():
     """Get a list of available gpu devices (formatted as strings).
@@ -140,17 +142,17 @@ def getSiameseModel(left_input,right_input):
 
     # Convolutional Neural Network
     model = Sequential()
-    model.add(Conv2D(64, (10,10), activation='relu', input_shape=input_shape,
+    model.add(Conv2D(64, (9,9), activation='relu', input_shape=input_shape,
                    kernel_initializer=initialize_weights, kernel_regularizer=l2(2e-4)))
     model.add(MaxPooling2D())
-    model.add(Conv2D(64, (10,10), activation='relu', input_shape=input_shape,
+    model.add(Conv2D(64, (5,5), activation='relu', input_shape=input_shape,
                    kernel_initializer=initialize_weights, kernel_regularizer=l2(2e-4)))
     model.add(MaxPooling2D())
-    model.add(Conv2D(128, (7,7), activation='relu',
+    model.add(Conv2D(128, (3,3), activation='relu',
                      kernel_initializer=initialize_weights,
                      bias_initializer=initialize_bias, kernel_regularizer=l2(2e-4)))
     model.add(MaxPooling2D())
-    model.add(Conv2D(128, (4,4), activation='relu', kernel_initializer=initialize_weights,
+    model.add(Conv2D(128, (3,3), activation='relu', kernel_initializer=initialize_weights,
                      bias_initializer=initialize_bias, kernel_regularizer=l2(2e-4)))
     model.add(MaxPooling2D())
     model.add(Conv2D(256, (2,2), activation='relu', kernel_initializer=initialize_weights,
@@ -182,9 +184,9 @@ def getSiameseModel(left_input,right_input):
     return siamese_net
 
 def siameseNetworkTrain(clusters,imgs_dir):
-    tfback._get_available_gpus = _get_available_gpus
-    tfback._get_available_gpus()
-    tf.config.list_logical_devices()
+    # tfback._get_available_gpus = _get_available_gpus
+    # tfback._get_available_gpus()
+    # tf.config.list_logical_devices()
 
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
@@ -204,13 +206,16 @@ def siameseNetworkTrain(clusters,imgs_dir):
     total_sample_size = 20000
 
     X, Y = get_data(total_sample_size, clusters,imgs_dir)
-    process = psutil.Process(os.getpid())
-    print(process.memory_info().rss)  # in bytes
+
+    memoryCheck()
 
     x_train, x_test, y_train, y_test = train_test_split(X, Y, test_size=.25)
 
     releaseList(X)
     releaseList(Y)
+    gc.collect()
+
+    memoryCheck()
 
     input_dim = x_train.shape[2:]
     img_a = Input(shape=input_dim)
@@ -221,15 +226,19 @@ def siameseNetworkTrain(clusters,imgs_dir):
     img_1 = x_train[:, 0]
     img_2 = x_train[:, 1]
 
-    process = psutil.Process(os.getpid())
-    print(process.memory_info().rss)  # in bytes
+    memoryCheck()
 
-    clearAllValuesExceptSelection(['img_1','img_2','y_train'])
+    history = model.fit([img_1, img_2], y_train, validation_split=.25, batch_size=128, verbose=2, epochs=15)
 
-    process = psutil.Process(os.getpid())
-    print(process.memory_info().rss)  # in bytes
+    memoryCheck()
 
-    history = model.fit([img_1, img_2], y_train, validation_split=.25, batch_size=128, verbose=2, epochs=60)
+    releaseList(img_1)
+    releaseList(img_2)
+    releaseList(y_train)
+    gc.collect()
+
+    memoryCheck()
+
     acc_dir = './output/siamese_training_acc_plot.png'
     loss_dir = './output/siamese_training_loss_plot.png'
     trainingClassificationPlot(history,acc_dir,loss_dir)
@@ -240,28 +249,34 @@ def theSort(sub_li):
     sub_li.sort(key = lambda x: x[0])
     return sub_li
 
-def getAllImages(clusters):
+def getAllImages(clusters,imgs_dir):
     for i in range(len(clusters)):
-        yield getTheRowImages(clusters[i])
+        yield getTheRowImages(clusters[i],imgs_dir)
 
-def getTheRowImages(this_cluster):
+def getTheRowImages(this_cluster,imgs_dir):
+    images = []
     for i in range(len(this_cluster)):
-        yield read_image(imgs_dir+'/'+this_cluster[i])
+        images.append(read_image(imgs_dir+'/'+this_cluster[i]))
+    return images
 
 def siameseNetworkPredict(model,imgs_dir,clusters_a,clusters_b):
-    all_images_a = getAllImages(clusters_a)
-    all_images_b = getAllImages(clusters_b)
+    all_images_a = list(getAllImages(clusters_a,imgs_dir))
+    all_images_b = list(getAllImages(clusters_b,imgs_dir))
 
     allProbs = []
-    for inputs_a,index_a in enumerate(tqdm(all_images_a)):
+    for i in tqdm(range(len(all_images_a))):
         the_highest_score = 0
-        for inputs_b,index_b in enumerate(all_images_b):
+        inputs_a = all_images_a[i]
+        for j in range(len(all_images_b)):
+            inputs_b = all_images_b[j]
             if len(inputs_a)>len(inputs_b):
                 for l in range(len(inputs_a)-len(inputs_b)):
-                    inputs_b.append(inputs_b[0])
+                    # inputs_b.append(inputs_b[0])
+                    inputs_b.append(create_white_image())
             else:
                 for l in range(len(inputs_b)-len(inputs_a)):
-                    inputs_a.append(inputs_a[0])
+                    # inputs_a.append(inputs_a[0])
+                    inputs_a.append(create_white_image())
 
             probs = model.predict([inputs_a,inputs_b])
             probs = [x[0] for x in probs]
@@ -271,14 +286,22 @@ def siameseNetworkPredict(model,imgs_dir,clusters_a,clusters_b):
                 the_index_a = i
                 the_index_b = j
 
-    allProbs.append([the_highest_score,the_index_a,the_index_b])
-    allProbs = theSort(allProbs)
+        allProbs.append([the_highest_score,the_index_a,the_index_b])
 
     return allProbs
 
 def siameseNetworkMain(imgs_dir,clusters_a,clusters_b):
+    memoryCheck()
+
     model = siameseNetworkTrain(clusters_a,imgs_dir)
+
+    gc.collect()
+    memoryCheck()
+
     predict = siameseNetworkPredict(model,imgs_dir,clusters_a,clusters_b)
+
+    gc.collect()
+    memoryCheck()
 
     write_test_predict_dir = './output/test_predict.csv'
     saveListToFile(predict,write_test_predict_dir)

@@ -11,3 +11,11 @@ def convertDataFrame(data,first_col,write_dir):
     data.to_csv(write_dir, index=False)
 
     return data
+
+def convertDataFrameNoSave(data,first_col):
+    data = DF(data, dtype=object)
+    if first_col != None:
+        first_col = DF(first_col, dtype=str)
+        data.insert(0, 'ID', first_col)
+
+    return data

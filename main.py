@@ -5,6 +5,7 @@ import time
 import random
 import numpy as np
 import psutil
+import gc
 
 from dataPreparation.dataLoad import dataLoadFromFile
 from dataPreparation.dataPreparation import DataPreparation
@@ -12,16 +13,23 @@ from dataProcessing.dataProcessing import mainDataProcessing
 from dataPreparation.dataFrame import convertDataFrame
 from dataDedimension.parseData import parseData
 from dataDedimension.tsneReducer import tsne
-from dataPreparation.dataCorrection import dataCorrection
+from dataPreparation.dataCorrection import dataCorrection,dataCorrectionForMerging
 from dataPreparation.dataListToFile import saveListToFile
 
 from dataClustering.dataKMeans import kmeansClustering
 from dataClustering.dataKernel import kernelKMeans
 from cleanClusters.cleanClusters import cleanClusters
+from cleanClusters.repeatClustering import repeatClustering
 from dataPreparation.buildReClusterDataset import buildReClusterDataset
+from dataPreparation.dataReadToList import readcsvToList
+from dataEvaluation.buildLookupDict import buildLookupDict
+from dataEvaluation.dataMetrics import f1_score
 
 from siameseNetwork.siameseNetwork import siameseNetworkMain
-from memoryManagement.memoryRelease import releaseList,clearAllValuesExceptSelection
+from memoryManagement.memoryRelease import releaseList
+from memoryManagement.memoryCheck import memoryCheck
+
+from clustersMerging.clustersMerging import combineClustersCentroidsAsFeatures,mergeClusters
 
 if __name__ == "__main__":
     print("Start of the program")
@@ -30,87 +38,105 @@ if __name__ == "__main__":
     input_dir,label_csv_dir,extract_csv_dir,output_dir,extract_mode,model_name,feature_cols,unique_col,reduce,cluster_mode = mainParser()
 
     the_feature_extract_file = "./output/features_extraction.csv"
+    imgs_dir = '../sample_data/unlabeled'
     if os.path.isfile(the_feature_extract_file):
         print ("Start: Reading the existing tsne features file")
-        features_df = dataLoadFromFile(the_feature_extract_file)
+        features = dataLoadFromFile(the_feature_extract_file)
     else:
         thisDataPre = DataPreparation(input_dir)
-        train_images_with_filenames,class_lookup_df = thisDataPre.loadImages()
-        print('Found {} images'.format(len(train_images_with_filenames)))
-        train_images_with_filenames = random.sample(train_images_with_filenames,len(train_images_with_filenames))
+        img_names = list(thisDataPre.loadImages())
 
-        process = psutil.Process(os.getpid())
-        print(process.memory_info().rss)  # in bytes
+        print('Found {} images'.format(len(img_names)))
+        img_names = random.sample(img_names,len(img_names))
 
-        features,img_names = mainDataProcessing(model_name, train_images_with_filenames)
+        thisDataPre = None
+        memoryCheck()
 
-        releaseList(train_images_with_filenames)
+        features = mainDataProcessing(model_name,img_names,imgs_dir)
 
         write_original_dir = './output/features_extraction_org.csv'
-        features_df = convertDataFrame(features,img_names,write_original_dir)
-        df = parseData(features_df,feature_cols,unique_col)
-        features_df = tsne(df, dims=int(reduce), write_to=extract_csv_dir)
-    image_paths = features_df['ID'].tolist()
-    features_df_temp = features_df[:]
-    del features_df['ID']
-    dataset = dataCorrection(features_df)
+        features = convertDataFrame(features,img_names,write_original_dir)
 
-    the_feature_extract_file_org = "./output/features_extraction_org.csv"
-    if os.path.isfile(the_feature_extract_file_org):
-        print ("Start: Reading the existing original features file")
-        features_df_org = dataLoadFromFile(the_feature_extract_file_org)
-        del features_df_org['ID']
-        dataset_org = dataCorrection(features_df_org)
-    else:
-        print ("Warn: You might need to delete all files in output folder and re-run")
+        gc.collect()
+
+        features = parseData(features,feature_cols,unique_col)
+        features = tsne(features, dims=int(reduce), write_to=extract_csv_dir)
+    image_paths = features['ID'].tolist()
+    features_df_temp = features[:]
+    del features['ID']
+    dataset = dataCorrection(features)
+
+    gc.collect()
 
     """"Clustering Part"""""
 
-    n_clusters = 50
-    clusters_kmeans = kmeansClustering(dataset,image_paths,n_clusters)
-    write_kmeans_dir = './output/kmeans_clusters.csv'
-    saveListToFile(clusters_kmeans,write_kmeans_dir)
+    # """"K-means"""""
+    # n_clusters = 11
+    # clusters_kmeans = kmeansClustering(dataset,image_paths,n_clusters)
+    # write_kmeans_dir = './output/kmeans_clusters.csv'
+    # saveListToFile(clusters_kmeans,write_kmeans_dir)
+    #
+    # write_kmeans_dir = None, None
+    # gc.collect()
+    #
+    # """"First Kernel K-means"""""
+    # sigma = 10
+    # clusters_kernel_kmeans = kernelKMeans(dataset,image_paths,n_clusters,sigma)
+    # write_kernel_kmeans_dir = './output/kernel_kmeans_clusters.csv'
+    # saveListToFile(clusters_kernel_kmeans,write_kernel_kmeans_dir)
+    #
+    # dataset = None
+    # gc.collect()
 
-    sigma = 1.2
-    clusters_kernel_kmeans = kernelKMeans(dataset,image_paths,n_clusters,sigma)
-    write_kernel_kmeans_dir = './output/kernel_kmeans_clusters.csv'
-    saveListToFile(clusters_kernel_kmeans,write_kernel_kmeans_dir)
+    """Repeat Clustering"""
+    iter = 8
+    n_clusters = 49
+    sigma = 1.3
+    repeatClustering(features_df_temp,image_paths,iter,sigma,n_clusters)
 
-    print ("Start: Clean Kernel-K-means clusters")
-    re_cluster_imgs, re_kernel_kmeans_clusters = cleanClusters(clusters_kernel_kmeans[:])
-    for i in range(len(re_kernel_kmeans_clusters)):
-        print("Cluster {} containing {} objects".format(i,len(re_kernel_kmeans_clusters[i])))
+    image_paths=sigma=n_clusters=None
 
-    write_to_cluster_images_dir = './output/to_cluster_images.csv'
-    write_to_cluster_images = [ [x] for x in re_cluster_imgs]
-    saveListToFile(write_to_cluster_images,write_to_cluster_images_dir)
+    """Merging clusters"""
+    features_extraction = dataCorrectionForMerging(features_df_temp)
+    features,cluster_names = combineClustersCentroidsAsFeatures(iter,features_extraction)
 
-    write_re_kernel_kmeans_dir = './output/re_kernel_kmeans_clusters.csv'
-    saveListToFile(re_kernel_kmeans_clusters,write_re_kernel_kmeans_dir)
+    features_extraction = None
 
-    re_cluster_features_df = buildReClusterDataset(features_df_temp,re_cluster_imgs)
-    re_cluster_image_paths = re_cluster_features_df['ID'].tolist()
-    del re_cluster_features_df['ID']
-    re_cluster_dataset = dataCorrection(re_cluster_features_df)
+    sigma = 10
+    n_clusters = int(len(features)/(iter*4))
+    kernel_kmeans_merging_clusters_clusters = kernelKMeans(features,cluster_names,n_clusters,sigma)
 
-    the_sigma = 1
-    second_clusters_kernel_kmeans = kernelKMeans(re_cluster_dataset,re_cluster_image_paths,n_clusters,the_sigma)
-    write_second_kernel_kmeans_dir = './output/second_kernel_kmeans_clusters.csv'
-    saveListToFile(second_clusters_kernel_kmeans,write_second_kernel_kmeans_dir)
+    features,cluster_names = None, None
 
-    print ("Start: Second Clean Kernel-K-means clusters")
-    re_cluster_imgs_a, re_kernel_kmeans_clusters_a = cleanClusters(second_clusters_kernel_kmeans[:])
-    for i in range(len(re_kernel_kmeans_clusters_a)):
-        print("Cluster {} containing {} objects".format(i,len(re_kernel_kmeans_clusters_a[i])))
+    write_kernel_kmeans_merging_clusters_clusters_dir = './output/kernel_kmeans_merging_clusters_clusters.csv'
+    saveListToFile(kernel_kmeans_merging_clusters_clusters,write_kernel_kmeans_merging_clusters_clusters_dir)
 
-    write_to_cluster_images_a_dir = './output/to_cluster_images_a.csv'
-    write_to_cluster_images_a = [ [x] for x in re_cluster_imgs_a]
-    saveListToFile(write_to_cluster_images_a,write_to_cluster_images_a_dir)
+    write_kernel_kmeans_merging_clusters_clusters_dir = None
 
-    write_re_kernel_kmeans_a_dir = './output/re_kernel_kmeans_clusters_a.csv'
-    saveListToFile(re_kernel_kmeans_clusters_a,write_re_kernel_kmeans_a_dir)
+    merged_clusters = mergeClusters(kernel_kmeans_merging_clusters_clusters)
 
-    clearAllValuesExceptSelection(['re_kernel_kmeans_clusters','re_kernel_kmeans_clusters_a'])
+    kernel_kmeans_merging_clusters_clusters = None
 
-    imgs_dir = '../sample_data/unlabeled'
-    siameseNetworkMain(imgs_dir,re_kernel_kmeans_clusters,re_kernel_kmeans_clusters_a)
+    write_merged_clusters_dir = './output/merged_clusters.csv'
+    saveListToFile(merged_clusters,write_merged_clusters_dir)
+
+    """Evaluate Precision of Merged Clusters"""
+    write_lookup_dir = './output/class_lookup.csv'
+    if os.path.isfile(write_lookup_dir):
+        label_lookup = readcsvToList(write_lookup_dir)
+    else:
+        print ("Note: there needs a class lookup csv file, please delete all exisiting files in output dir and re-run")
+
+    label_lookup = buildLookupDict(label_lookup)
+
+    # print ("--------K-means Clusters Precision:-------")
+    # _, _, _, precision, recall, score = f1_score(clusters_kmeans, label_lookup)
+    # print('Clusters: {}  Precision: {:.3f}  Recall: {:.3f}  F1: {:.3f}'.format(len(clusters_kmeans), precision, recall, score))
+    #
+    # print ("--------Kernel K-means Clusters Precision:-------")
+    # _, _, _, precision, recall, score = f1_score(clusters_kernel_kmeans, label_lookup)
+    # print('Clusters: {}  Precision: {:.3f}  Recall: {:.3f}  F1: {:.3f}'.format(len(clusters_kernel_kmeans), precision, recall, score))
+
+    print ("--------Merged Clusters Precision:-------")
+    _, _, _, precision, recall, score = f1_score(merged_clusters, label_lookup)
+    print('Clusters: {}  Precision: {:.3f}  Recall: {:.3f}  F1: {:.3f}'.format(len(merged_clusters), precision, recall, score))
